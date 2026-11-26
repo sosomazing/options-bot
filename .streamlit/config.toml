@@ -1,0 +1,14 @@
+# Streamlit settings for the dashboard.
+[server]
+# Only your own computer can open the dashboard (not others on your Wi-Fi).
+address = "localhost"
+port = 8501
+headless = false
+
+[browser]
+gatherUsageStats = false
+
+[client]
+# Hide the "Deploy" button: this dashboard is for local use only.
+toolbarMode = "minimal"
+showErrorDetails = false

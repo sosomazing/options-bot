@@ -1,0 +1,17 @@
+# Real credentials live here. Never commit it.
+.env
+.env.*
+!.env.example
+
+# Local runtime files
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
