@@ -1,4 +1,4 @@
-# Options Bot: Stage 1 (foundation)
+# Options Bot: Stage 2 (Alpaca paper connection)
 
 > **PAPER TRADING ONLY.** This project only connects to Alpaca's **paper** (simulated money)
 > endpoint, `https://paper-api.alpaca.markets`. It refuses live keys and live URLs, and in
@@ -9,7 +9,9 @@ uses VWAP, EMA 9, EMA 21, RSI 14 and volume. Stage 1 is only the foundation:
 
 | Works now | Comes later |
 |---|---|
-| Safe settings (paper mode enforced) | Market data and indicators (stage 2+) |
+| Alpaca connection test (stage 2) | Market data and indicators (stage 3+) |
+| Market clock: open/closed, next open/close (stage 2) | |
+| Safe settings (paper mode enforced) | |
 | Read-only Alpaca paper connection | Signals from the strategy |
 | Account status, cash, equity, buying power | Paper order entry and exits |
 | SQLite database (signals, orders, positions, trades) | Risk limits, end-of-day flattening |
@@ -63,6 +65,7 @@ pip install -r requirements.txt
 | SQLAlchemy | 2.1.9 | Talks to the SQLite database |
 | streamlit | 1.67.0 | The dashboard in your browser |
 | pytest | 9.2.0 | Runs the automated tests |
+| tzdata | 2026.6 | Time-zone data (Windows has none built in) for New York market times |
 
 ---
 
@@ -98,7 +101,35 @@ chat or screenshots.
 
 Run every command from the `options-bot` folder with the venv active.
 
-### 3.1 Health check (command line)
+### 3.1 Connection test (stage 2)
+```powershell
+python -m options_bot.connection_test
+```
+It checks each step and stops at the first problem:
+```
+================================================================
+  ALPACA CONNECTION TEST  |  PAPER TRADING ONLY  |  orders DISABLED
+================================================================
+
+  [PASS] Load settings (.env): paper mode, keys loaded (hidden)
+  [PASS] Paper endpoint check: https://paper-api.alpaca.markets
+  [PASS] Account (GET /v2/account): status ACTIVE
+  [PASS] Market clock (GET /v2/clock): CLOSED (next open Fri 2026-11-27 09:30 EST)
+
+  Account:       ********1234
+  Status:        ACTIVE
+  Equity:        $1,000.00
+  Buying power:  $...
+  Cash:          $1,000.00
+  Market:        CLOSED (next open Fri 2026-11-27 09:30 EST)
+
+CONNECTION SUCCESS: connected to the Alpaca PAPER trading API.
+```
+If something is wrong it ends with `CONNECTION FAILED:` and the reason, for example missing
+keys, live keys, wrong keys (HTTP 401/403) or no internet. Your keys are never printed.
+Exit codes: `0` success, `2` settings problem, `3` Alpaca problem.
+
+### 3.1b Health check (command line)
 ```powershell
 python -m options_bot
 ```
@@ -115,6 +146,7 @@ Equity:               $1,000.00
 Buying power:         $...
 Options buying power: $...
 Options level:        ...
+Market:               OPEN (closes Wed 2026-11-25 16:00 EST)
 ```
 Exit codes: `0` OK, `2` settings problem, `3` Alpaca problem, `4` database problem.
 
@@ -129,7 +161,7 @@ bar at the top is the paper-trading indicator. The dashboard has no trading butt
 ```powershell
 pytest
 ```
-Expected: `97 passed, 1 skipped`. The skipped test is the live connection test. To run it
+Expected: `117 passed, 1 skipped`. The skipped test is the live connection test. To run it
 against your real **paper** account:
 ```powershell
 $env:ALPACA_API_KEY = "PK..."; $env:ALPACA_SECRET_KEY = "..."
@@ -148,6 +180,7 @@ options-bot/
 │  ├─ errors.py              our own error types (settings vs Alpaca vs orders)
 │  ├─ logging_setup.py       screen + file logging, with secrets removed
 │  ├─ main.py / __main__.py  the "python -m options_bot" health check
+│  ├─ connection_test.py     the "python -m options_bot.connection_test" check
 │  ├─ broker/
 │  │  └─ alpaca_client.py    read-only Alpaca paper client (orders blocked)
 │  ├─ db/
@@ -183,7 +216,9 @@ hard-coded constant, `ORDER_SUBMISSION_ENABLED = False`. No setting can turn it 
 with, and disables every method that can change anything: `submit_order`, `replace_order_by_id`,
 `cancel_order(s)`, `close_position(s)`, `exercise_options_position`, account configuration,
 watchlist edits, and the raw `post/put/patch/delete` calls they all use underneath. The only
-thing you can do is `get_account_summary()`, which calls `GET /v2/account`. Errors become
+things you can do are `get_account_summary()` (`GET /v2/account`: status, equity, buying
+power, cash), `get_market_clock()` (`GET /v2/clock`: open or closed, next open and close, in
+New York time) and read `endpoint`, which re-checks the paper URL each time. Errors become
 clear messages such as "Alpaca rejected the credentials, make sure they are PAPER keys", and
 never include your keys.
 
@@ -197,7 +232,7 @@ duplicate order IDs).
 like an Alpaca key or a `secret=...` pair, before a line is written. That includes error
 tracebacks.
 
-**Tests (`tests/`).** 97 automated checks. Config tests try live URLs, live keys, live mode and
+**Tests (`tests/`).** 117 automated checks. Config tests try live URLs, live keys, live mode and
 bad values. Database tests save and load every table and try to break the safety rules.
 Broker tests use a fake Alpaca client (no network) and also build the real alpaca-py client
 to prove it targets the paper URL and that every write method is blocked. One test fails if a
@@ -223,6 +258,7 @@ future alpaca-py version adds a new write method we haven't blocked.
 - Alpaca docs home (see the *Paper Trading*, *Authentication* and *Options Trading* sections): <https://docs.alpaca.markets/>
 - Account endpoint (`GET /v2/account`): <https://docs.alpaca.markets/reference/getaccount>
   (this is the link alpaca-py itself uses)
+- Market clock (`GET /v2/clock`): alpaca-py `TradingClient.get_clock()`
 - alpaca-py SDK source: <https://github.com/alpacahq/alpaca-py>
 
 Every endpoint in this project comes from alpaca-py 0.45.0's own code, not from memory:

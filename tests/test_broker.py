@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -20,12 +21,21 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import AccountStatus
 
 from options_bot.broker import PaperBrokerClient
-from options_bot.broker.alpaca_client import BLOCKED_METHODS, mask_account_number
+from options_bot.broker.alpaca_client import BLOCKED_METHODS, MARKET_TZ, mask_account_number
 from options_bot.config import PAPER_TRADING_URL, load_settings
 from options_bot.errors import (
     BrokerConnectionError, BrokerError, LiveTradingRefusedError, OrderSubmissionDisabledError,
 )
 from tests.conftest import FAKE_KEY, FAKE_SECRET
+
+
+def fake_clock(**overrides):
+    # Wednesday 2026-11-25, 15:00 UTC = 10:00 New York, market open.
+    data = dict(timestamp=datetime(2026, 11, 25, 15, 0, tzinfo=timezone.utc), is_open=True,
+                next_open=datetime(2026, 11, 27, 14, 30, tzinfo=timezone.utc),
+                next_close=datetime(2026, 11, 25, 21, 0, tzinfo=timezone.utc))
+    data.update(overrides)
+    return SimpleNamespace(**data)
 
 
 def fake_account(**overrides):
@@ -41,11 +51,14 @@ class FakeTradingClient:
 
     instances: list["FakeTradingClient"] = []
 
-    def __init__(self, api_key, secret_key, paper, base_url=BaseURL.TRADING_PAPER, account=None, error=None):
+    def __init__(self, api_key, secret_key, paper, base_url=BaseURL.TRADING_PAPER, account=None, error=None,
+                 clock=None, clock_error=None):
         self.kwargs = dict(api_key=api_key, secret_key=secret_key, paper=paper)
         self._base_url = base_url
         self._account = account or fake_account()
         self._error = error
+        self._clock = clock or fake_clock()
+        self._clock_error = clock_error
         self.submitted = []
         FakeTradingClient.instances.append(self)
 
@@ -53,6 +66,11 @@ class FakeTradingClient:
         if self._error:
             raise self._error
         return self._account
+
+    def get_clock(self):
+        if self._clock_error:
+            raise self._clock_error
+        return self._clock
 
     def submit_order(self, *args, **kwargs):  # would be a real order; must never run
         self.submitted.append((args, kwargs))
@@ -113,11 +131,81 @@ def test_client_pointed_elsewhere_fails_closed(settings):
         PaperBrokerClient(settings, client_factory=factory(base_url="https://example.com"))
 
 
+def test_endpoint_property_is_paper(settings):
+    assert PaperBrokerClient(settings, client_factory=factory()).endpoint == PAPER_TRADING_URL
+
+
+def test_endpoint_property_rechecks_the_client(settings):
+    client = PaperBrokerClient(settings, client_factory=factory())
+    client._client._base_url = BaseURL.TRADING_LIVE  # simulate tampering after creation
+    with pytest.raises(LiveTradingRefusedError):
+        client.endpoint
+
+
+# ------------------------------------------------------------- market clock
+def test_market_clock_open_in_new_york_time(settings):
+    clock = PaperBrokerClient(settings, client_factory=factory()).get_market_clock()
+    assert clock.is_open is True
+    assert clock.timestamp.tzinfo == MARKET_TZ and clock.timestamp.hour == 10
+    assert clock.next_close.hour == 16
+    assert clock.describe().startswith("OPEN (closes Wed 2026-11-25 16:00 EST")
+
+
+def test_market_clock_closed(settings):
+    client = PaperBrokerClient(settings, client_factory=factory(clock=fake_clock(is_open=False)))
+    text = client.get_market_clock().describe()
+    assert text.startswith("CLOSED (next open Fri 2026-11-27 09:30 EST")
+
+
+def test_market_clock_naive_time_treated_as_utc(settings):
+    clock = fake_clock(timestamp=datetime(2026, 7, 1, 14, 0))  # summer: UTC-4
+    result = PaperBrokerClient(settings, client_factory=factory(clock=clock)).get_market_clock()
+    assert result.timestamp.hour == 10
+
+
+@pytest.mark.parametrize("overrides", [dict(is_open=None), dict(next_open="tomorrow"), dict(timestamp=None)])
+def test_market_clock_bad_response(settings, overrides):
+    client = PaperBrokerClient(settings, client_factory=factory(clock=fake_clock(**overrides)))
+    with pytest.raises(BrokerError):
+        client.get_market_clock()
+
+
+def test_market_clock_network_failure(settings):
+    client = PaperBrokerClient(settings, client_factory=factory(clock_error=requests.exceptions.ConnectionError()))
+    with pytest.raises(BrokerConnectionError):
+        client.get_market_clock()
+
+
+def test_real_client_clock_uses_get_on_clock_path(settings, monkeypatch):
+    """Prove alpaca-py's get_clock is a plain GET /v2/clock on the paper host."""
+    seen = []
+
+    def fake_request(self, method, url, **kwargs):
+        seen.append((method, url))
+        response = requests.Response()
+        response.status_code = 200
+        response._content = (b'{"timestamp": "2026-11-25T10:00:00-05:00", "is_open": true,'
+                             b' "next_open": "2026-11-27T09:30:00-05:00", "next_close": "2026-11-25T16:00:00-05:00"}')
+        return response
+
+    monkeypatch.setattr(requests.Session, "request", fake_request)
+    clock = PaperBrokerClient(settings).get_market_clock()
+    assert seen == [("GET", "https://paper-api.alpaca.markets/v2/clock")]
+    assert clock.is_open and clock.next_close.hour == 16
+
+
+def test_unexpected_errors_become_broker_errors(settings):
+    client = PaperBrokerClient(settings, client_factory=factory(error=ValueError(f"weird {FAKE_SECRET}")))
+    with pytest.raises(BrokerError) as info:
+        client.get_account_summary()
+    assert "ValueError" in str(info.value) and FAKE_SECRET not in str(info.value)
+
+
 # --------------------------------------------------------- orders are blocked
 def test_wrapper_has_no_order_methods(settings):
     client = PaperBrokerClient(settings, client_factory=factory())
     public = {m for m in dir(client) if not m.startswith("_")}
-    assert public == {"get_account_summary"}
+    assert public == {"get_account_summary", "get_market_clock", "endpoint"}
 
 
 def test_inner_fake_client_order_paths_blocked(settings):
@@ -201,6 +289,8 @@ def test_mask_account_number():
 @pytest.mark.skipif(not os.environ.get("ALPACA_API_KEY"), reason="set ALPACA_API_KEY/ALPACA_SECRET_KEY (paper) to run")
 def test_real_paper_account_connection():
     settings = load_settings(dict(os.environ))
-    summary = PaperBrokerClient(settings).get_account_summary()
+    client = PaperBrokerClient(settings)
+    summary = client.get_account_summary()
     assert summary.status != "unknown"
     assert summary.is_paper
+    assert isinstance(client.get_market_clock().is_open, bool)

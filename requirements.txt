@@ -7,3 +7,5 @@ python-dotenv==1.2.4
 SQLAlchemy==2.1.9
 streamlit==1.67.0
 pytest==9.2.0
+# Time-zone data. Windows has none built in; needed for New York market times.
+tzdata==2026.6

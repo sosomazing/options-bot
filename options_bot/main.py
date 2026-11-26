@@ -14,7 +14,7 @@ import sys
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from options_bot.broker import AccountSummary, PaperBrokerClient
+from options_bot.broker import AccountSummary, MarketClock, PaperBrokerClient
 from options_bot.config import load_settings
 from options_bot.db import init_db, make_engine
 from options_bot.errors import BrokerError, ConfigError
@@ -34,7 +34,7 @@ def _money(value) -> str:
     return "n/a" if value is None else f"${value:,.2f}"
 
 
-def format_summary(summary: AccountSummary, starting_balance) -> str:
+def format_summary(summary: AccountSummary, starting_balance, clock: MarketClock | None = None) -> str:
     lines = [
         f"Account:              {summary.account_number_masked}",
         f"Status:               {summary.status}{'' if summary.is_active else '  (NOT ready to trade)'}",
@@ -46,6 +46,8 @@ def format_summary(summary: AccountSummary, starting_balance) -> str:
         f"Trading blocked:      {summary.trading_blocked}",
         f"Account blocked:      {summary.account_blocked}",
     ]
+    if clock is not None:
+        lines.append(f"Market:               {clock.describe()}")
     if summary.equity is not None and summary.equity != starting_balance:
         lines.append(
             f"Note: equity differs from STARTING_BALANCE ({_money(starting_balance)}). "
@@ -73,12 +75,14 @@ def main() -> int:
         return 4
 
     try:
-        summary = PaperBrokerClient(settings).get_account_summary()
+        broker = PaperBrokerClient(settings)
+        summary = broker.get_account_summary()
+        clock = broker.get_market_clock()
     except BrokerError as exc:
         log.error("Alpaca problem: %s", exc)
         return 3
 
-    print("\n" + format_summary(summary, settings.starting_balance) + "\n")
+    print("\n" + format_summary(summary, settings.starting_balance, clock) + "\n")
     log.info("Connected to Alpaca paper account %s (status %s)", summary.account_number_masked, summary.status)
     return 0
 

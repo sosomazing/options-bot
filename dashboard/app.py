@@ -35,7 +35,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.title("Options Bot")
-st.caption(f"Stage 1 foundation. Connected endpoint: {PAPER_TRADING_URL}")
+st.caption(f"Stage 2: Alpaca paper connection. Endpoint: {PAPER_TRADING_URL}")
 
 
 def money(value) -> str:
@@ -83,6 +83,12 @@ else:
     c8.metric("Account", account.account_number_masked)
     if account.trading_blocked or account.account_blocked:
         st.warning("Alpaca reports this account as blocked.")
+    try:
+        clock = broker.get_market_clock()
+    except BrokerError as exc:
+        st.warning(f"Market clock unavailable: {exc}")
+    else:
+        st.info(f"US market: {clock.describe()}")
     if st.button("Refresh"):
         st.rerun()
 

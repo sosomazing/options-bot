@@ -15,6 +15,7 @@ What this file does, in plain terms:
 Alpaca docs used:
 * Docs home:      https://docs.alpaca.markets/  (Paper Trading section)
 * Get account:    https://docs.alpaca.markets/reference/getaccount  (GET /v2/account)
+* Market clock:   TradingClient.get_clock() -> GET /v2/clock (alpaca-py 0.45.0 source)
 * alpaca-py:      https://github.com/alpacahq/alpaca-py
 """
 
@@ -22,8 +23,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 import requests
 from alpaca.common.exceptions import APIError
@@ -38,6 +41,9 @@ from options_bot.errors import (
 )
 
 log = logging.getLogger(__name__)
+
+# US options trade on New York time. (On Windows this needs the tzdata package.)
+MARKET_TZ = ZoneInfo("America/New_York")
 
 # Every TradingClient method that writes something. Each is replaced with a
 # function that raises. The raw HTTP verbs are what the others call inside,
@@ -124,6 +130,38 @@ class AccountSummary:
         return self.status == "ACTIVE" and not self.trading_blocked and not self.account_blocked
 
 
+@dataclass(frozen=True)
+class MarketClock:
+    """Is the US market open right now, and when does it next open/close?
+
+    Times are converted to New York (Eastern) time, the market's own clock.
+    """
+
+    timestamp: datetime
+    is_open: bool
+    next_open: datetime
+    next_close: datetime
+
+    @staticmethod
+    def _fmt(value: datetime) -> str:
+        return value.strftime("%a %Y-%m-%d %H:%M %Z")
+
+    def describe(self) -> str:
+        if self.is_open:
+            return f"OPEN (closes {self._fmt(self.next_close)})"
+        return f"CLOSED (next open {self._fmt(self.next_open)})"
+
+
+def _to_market_time(value: Any, field: str) -> datetime:
+    if not isinstance(value, datetime):
+        raise BrokerError(f"Alpaca clock response is missing a valid '{field}' time.")
+    if value.tzinfo is None:  # Alpaca sends offsets; treat a bare time as UTC to be safe
+        from datetime import timezone
+
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(MARKET_TZ)
+
+
 class PaperBrokerClient:
     """Read-only Alpaca paper client. It has no way to submit orders."""
 
@@ -162,6 +200,12 @@ class PaperBrokerClient:
         return f"PaperBrokerClient(endpoint={PAPER_TRADING_URL!r}, read_only=True)"
 
     # ------------------------------------------------------------------ reads
+    @property
+    def endpoint(self) -> str:
+        """The URL the client really uses, re-checked every time it's asked for."""
+        self._verify_endpoint(self._client)
+        return PAPER_TRADING_URL
+
     def get_account_summary(self) -> AccountSummary:
         """GET /v2/account -> status, cash, equity and buying power."""
         account = self._call("get_account")
@@ -176,6 +220,19 @@ class PaperBrokerClient:
             options_trading_level=getattr(account, "options_trading_level", None),
             trading_blocked=bool(getattr(account, "trading_blocked", False)),
             account_blocked=bool(getattr(account, "account_blocked", False)),
+        )
+
+    def get_market_clock(self) -> MarketClock:
+        """GET /v2/clock -> is the market open, next open and next close."""
+        clock = self._call("get_clock")
+        is_open = getattr(clock, "is_open", None)
+        if not isinstance(is_open, bool):
+            raise BrokerError("Alpaca clock response is missing 'is_open'.")
+        return MarketClock(
+            timestamp=_to_market_time(getattr(clock, "timestamp", None), "timestamp"),
+            is_open=is_open,
+            next_open=_to_market_time(getattr(clock, "next_open", None), "next_open"),
+            next_close=_to_market_time(getattr(clock, "next_close", None), "next_close"),
         )
 
     # --------------------------------------------------------------- helpers
@@ -204,3 +261,9 @@ class PaperBrokerClient:
             msg = f"Network error talking to Alpaca ({type(exc).__name__})."
             log.error(msg)
             raise BrokerConnectionError(msg) from None
+        except Exception as exc:
+            # Anything else (e.g. an unexpected response shape). Only the error
+            # type is reported: the message could echo request details.
+            msg = f"Unexpected error during {method} ({type(exc).__name__}). See logs/options_bot.log."
+            log.error(msg)
+            raise BrokerError(msg) from None
